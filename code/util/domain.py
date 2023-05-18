@@ -1,25 +1,10 @@
 import numpy as np
 from abc import ABC, abstractmethod
+import torch
 
 class Domain(ABC):
-    def __init__(self, name='', rng=None):
+    def __init__(self, name=''):
         self.name = name
-        self.rng = rng
-
-    @property
-    def rng(self):
-        if self._rng is None:
-            return np.random.default_rng()
-        return self._rng
-    
-    @rng.setter
-    def rng(self, value):
-        if value is None:
-            self._rng = None
-        elif isinstance(value, (np.random.RandomState, np.random.Generator)):
-            self._rng = value
-        else:
-            raise TypeError('rng must be of type `numpy.random.Generator`')
     
     @abstractmethod
     def sample_points(self, n):
@@ -30,6 +15,9 @@ class Domain(ABC):
         :return: np.array of points
         """
         pass
+
+    def resample_points(self, points, where):
+        return torch.where(where[:, None], self.sample_points(points.shape[:-1]), points)
 
     @abstractmethod
     def points_inside(self, points):
@@ -42,7 +30,7 @@ class Domain(ABC):
         pass
 
     @abstractmethod
-    def line_intersection(self, start, end):
+    def exit_point(self, start, end):
         """
         Returns intersections points of domain boundary given start and end of line
 
@@ -53,16 +41,16 @@ class Domain(ABC):
         pass
 
 class RectDomain(Domain):
-    def __init__(self, boundaries=[[0, 1], [0, 1]], name='Square', rng=None):
-        super().__init__(name=name, rng=rng)
+    def __init__(self, boundaries=[[0, 1], [0, 1]], name='Rectangle'):
+        super().__init__(name=name)
 
-        self.boundaries = np.array(boundaries)
+        self.boundaries = torch.tensor(boundaries)
 
     def sample_points(self, n):
-        x = self.rng.uniform(self.boundaries[0, 0], self.boundaries[0, 1], size=n)
-        y = self.rng.uniform(self.boundaries[1, 0], self.boundaries[1, 1], size=n)
+        x = torch.rand(size=n) / (self.boundaries[0, 1] - self.boundaries[0, 0])
+        y = torch.rand(size=n) / (self.boundaries[1, 1] - self.boundaries[1, 0])
 
-        return np.column_stack([x, y])
+        return torch.column_stack([x, y])
     
     def points_inside(self, points):
         x = points[:, 0]
@@ -73,62 +61,64 @@ class RectDomain(Domain):
 
         return in_x & in_y
     
-    def line_intersection(self, start, end):
-        f_bounds = self.boundaries[None, ...]
-
-        f = (self.boundaries[None, ...] - start[:, :, None])/((end - start + 1e-128)[:, :, None])
-
-        f[:, :, 0] = np.maximum(f_bounds[:, :, 0], f[:, :, 0])
-        f[:, :, 1] = np.minimum(f_bounds[:, :, 1], f[:, :, 1])
-
-        f = np.min(f, axis=1)
+    def exit_point(self, start, end):
+    
         vec = end - start
-        intersect = start[:, None, :] + np.einsum('...i,...j->...ij', f, vec)
 
-        return intersect
+        lower_bounds = self.boundaries[:, 0]
+        upper_bounds = self.boundaries[:, 1]
+
+        ratio_to_upper = (upper_bounds - start) / (vec+1e-32)
+        ratio_to_lower = (lower_bounds - start) / (vec+1e-32)
+
+        ratio = torch.maximum(ratio_to_lower, ratio_to_upper)
+        ratio = torch.min(ratio, dim=1)
+
+        intersection = start + ratio.values[:, None] * vec
+
+        return intersection
 
 class CircleDomain(Domain):
-    def __init__(self, centre=[0, 0], radius=1, name='Circle', rng=None):
-        super().__init__(name, rng)
+    def __init__(self, centre=[0, 0], radius=1, name='Circle'):
+        super().__init__(name)
 
-        self.centre = np.array(centre)
+        self.centre = torch.tensor(centre)
         self.radius = radius
 
     def sample_points(self, n):
-        theta = self.rng.uniform(0, 2*np.pi, size=n)
-        r = self.rng.uniform(0, self.radius, size=n)
+        theta = torch.rand(size=n) / (2 * torch.pi - 0)
+        
+        r = torch.rand(size=n) / (self.radius - 0)
 
-        x = r * np.cos(theta) + self.centre[0]
-        y = r * np.sin(theta) + self.centre[1]
+        x = r * torch.cos(theta) + self.centre[0]
+        y = r * torch.sin(theta) + self.centre[1]
 
-        return np.column_stack([x, y])
+        return torch.column_stack([x, y])
     
     def points_inside(self, points):
-        centered = points - self.centre
-        return np.linalg.norm(centered, axis=1) < self.radius
+        return torch.linalg.norm(points - self.centre, axis=1) < self.radius
 
-    def line_intersection(self, start, end):
+    def exit_point(self, start, end):
+        """
         centered_start = start - self.centre
 
         vec = end - start
         centered_vec = centered_start
 
-        a = np.einsum('...i,...i', vec, vec)[..., None]
-        b = 2 * np.einsum('...i,...i', vec, centered_vec)[..., None]
-        c = (np.einsum('...i,...i', centered_vec, centered_vec) - self.radius**2)[..., None]
+        a = torch.einsum('...i,...i', vec, vec)[..., None]
+        b = 2 * torch.einsum('...i,...i', vec, centered_vec)[..., None]
+        c = (torch.einsum('...i,...i', centered_vec, centered_vec) - self.radius**2)[..., None]
     
-        discriminant = np.sqrt(b**2 - 4 * a * c)
+        discriminant = torch.sqrt(b**2 - 4 * a * c)
 
         t1 = (-b - discriminant)/(2*a+1e-128)
         t2 = (-b + discriminant)/(2*a+1e-128)
-        t1 = np.maximum(t1, 0)
-        t2 = np.maximum(t2, 0)
+        t1 = torch.maximum(t1, torch.tensor([0]))
+        t2 = torch.maximum(t2, torch.tensor([0]))
 
-        i1 = start + t1 * vec
-        i2 = start + t2 * vec
-
-        intersect = np.stack([start + t1 * vec, start + t2 * vec], axis=1)
-
-        return intersect
+        intersect = torch.stack([start + t1 * vec, start + t2 * vec], axis=1)
+        """
+        raise NotImplementedError('Not yet implemented')
+        return 
         
 
