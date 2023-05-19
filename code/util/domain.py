@@ -44,7 +44,7 @@ class RectDomain(Domain):
     def __init__(self, boundaries=[[0, 1], [0, 1]], name='Rectangle'):
         super().__init__(name=name)
 
-        self.boundaries = torch.tensor(boundaries)
+        self.boundaries = torch.tensor(boundaries, dtype=torch.float32)
 
     def sample_points(self, n):
         x = torch.rand(size=n) / (self.boundaries[0, 1] - self.boundaries[0, 0])
